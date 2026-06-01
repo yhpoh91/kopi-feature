@@ -76,7 +76,7 @@ functions:
     handler: src/handlers/health.handler
     timeout: 5
     memorySize: 128
-    reservedConcurrency: 100
+    reservedConcurrency: 5
     tracing: Active
     events:
       - httpApi:
