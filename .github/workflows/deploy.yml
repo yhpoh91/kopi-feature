@@ -1,0 +1,214 @@
+# Required GitHub repository secrets (Settings → Secrets → Actions):
+#   AWS_DEPLOY_ROLE_ARN — IAM role ARN for OIDC federation
+#   AWS_REGION          — deployment region (e.g. ap-southeast-1)
+
+name: Deploy
+
+on:
+  push:
+    branches: ['**']
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  ci:
+    name: CI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Secrets scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Security audit
+        # --omit=dev audits only production dependencies (what runs in Lambda).
+        # DevDependency vulnerabilities (e.g. in Serverless CLI, Vitest) are CI tooling concerns
+        # tracked separately via Dependabot, not as deploy blockers.
+        run: npm audit --audit-level=high --omit=dev
+
+  deploy-preview:
+    name: Deploy (preview)
+    needs: ci
+    if: github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      REGION: ${{ secrets.AWS_REGION || 'ap-southeast-1' }}
+      STACK: kopi-feature-preview
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION || 'ap-southeast-1' }}
+
+      - name: Check stack state
+        run: |
+          STATUS=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK" \
+            --region "$REGION" \
+            --query 'Stacks[0].StackStatus' \
+            --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+          echo "Stack status: $STATUS"
+
+          case "$STATUS" in
+            ROLLBACK_COMPLETE)
+              echo "Stack is in ROLLBACK_COMPLETE. Deleting before redeploy..."
+              aws cloudformation delete-stack --stack-name "$STACK" --region "$REGION"
+              aws cloudformation wait stack-delete-complete --stack-name "$STACK" --region "$REGION"
+              echo "Stack deleted. Proceeding with fresh deploy."
+              ;;
+            REVIEW_IN_PROGRESS)
+              # Stack was created via change set that was never executed.
+              # Deleting all pending change sets removes the stack.
+              echo "Stack is in REVIEW_IN_PROGRESS. Cancelling pending change sets..."
+              CHANGE_SETS=$(aws cloudformation list-change-sets \
+                --stack-name "$STACK" \
+                --region "$REGION" \
+                --query 'Summaries[*].ChangeSetName' \
+                --output text)
+              for CS in $CHANGE_SETS; do
+                echo "Deleting change set: $CS"
+                aws cloudformation delete-change-set \
+                  --stack-name "$STACK" \
+                  --change-set-name "$CS" \
+                  --region "$REGION"
+              done
+              aws cloudformation wait stack-delete-complete --stack-name "$STACK" --region "$REGION" 2>/dev/null || true
+              echo "Stack cleared. Proceeding with fresh deploy."
+              ;;
+            UPDATE_IN_PROGRESS|UPDATE_COMPLETE_CLEANUP_IN_PROGRESS|\
+            UPDATE_ROLLBACK_IN_PROGRESS|UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS|\
+            CREATE_IN_PROGRESS)
+              echo "Stack is in $STATUS. Waiting for stable state..."
+              aws cloudformation wait stack-update-complete --stack-name "$STACK" --region "$REGION" || true
+              ;;
+          esac
+
+      - name: Check for pending migrations
+        run: npm run migrate:check:preview
+
+      - name: Deploy → Preview
+        run: npx serverless deploy --stage preview --verbose
+
+      - name: Dump stack diagnostics on failure
+        if: failure()
+        run: |
+          aws cloudformation describe-stack-events \
+            --stack-name "$STACK" \
+            --region "$REGION" \
+            --query 'StackEvents[?ResourceStatus==`CREATE_FAILED` || ResourceStatus==`UPDATE_FAILED` || ResourceStatus==`ROLLBACK_IN_PROGRESS`].[LogicalResourceId,ResourceType,ResourceStatusReason]' \
+            --output table 2>/dev/null || echo "Stack does not exist or no events found"
+
+  deploy-prod:
+    name: Deploy (prod)
+    needs: ci
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      REGION: ${{ secrets.AWS_REGION || 'ap-southeast-1' }}
+      STACK: kopi-feature-prod
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION || 'ap-southeast-1' }}
+
+      - name: Check stack state
+        run: |
+          STATUS=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK" \
+            --region "$REGION" \
+            --query 'Stacks[0].StackStatus' \
+            --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+          echo "Stack status: $STATUS"
+
+          case "$STATUS" in
+            ROLLBACK_COMPLETE)
+              echo "Stack is in ROLLBACK_COMPLETE. Deleting before redeploy..."
+              aws cloudformation delete-stack --stack-name "$STACK" --region "$REGION"
+              aws cloudformation wait stack-delete-complete --stack-name "$STACK" --region "$REGION"
+              echo "Stack deleted. Proceeding with fresh deploy."
+              ;;
+            REVIEW_IN_PROGRESS)
+              echo "Stack is in REVIEW_IN_PROGRESS. Cancelling pending change sets..."
+              CHANGE_SETS=$(aws cloudformation list-change-sets \
+                --stack-name "$STACK" \
+                --region "$REGION" \
+                --query 'Summaries[*].ChangeSetName' \
+                --output text)
+              for CS in $CHANGE_SETS; do
+                echo "Deleting change set: $CS"
+                aws cloudformation delete-change-set \
+                  --stack-name "$STACK" \
+                  --change-set-name "$CS" \
+                  --region "$REGION"
+              done
+              aws cloudformation wait stack-delete-complete --stack-name "$STACK" --region "$REGION" 2>/dev/null || true
+              echo "Stack cleared. Proceeding with fresh deploy."
+              ;;
+            UPDATE_IN_PROGRESS|UPDATE_COMPLETE_CLEANUP_IN_PROGRESS|\
+            UPDATE_ROLLBACK_IN_PROGRESS|UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS|\
+            CREATE_IN_PROGRESS)
+              echo "Stack is in $STATUS. Waiting for stable state..."
+              aws cloudformation wait stack-update-complete --stack-name "$STACK" --region "$REGION" || true
+              ;;
+          esac
+
+      - name: Check for pending migrations
+        run: npm run migrate:check:prod
+
+      - name: Deploy → Production
+        run: npx serverless deploy --stage prod --verbose
+
+      - name: Dump stack diagnostics on failure
+        if: failure()
+        run: |
+          aws cloudformation describe-stack-events \
+            --stack-name "$STACK" \
+            --region "$REGION" \
+            --query 'StackEvents[?ResourceStatus==`CREATE_FAILED` || ResourceStatus==`UPDATE_FAILED` || ResourceStatus==`ROLLBACK_IN_PROGRESS`].[LogicalResourceId,ResourceType,ResourceStatusReason]' \
+            --output table 2>/dev/null || echo "Stack does not exist or no events found"

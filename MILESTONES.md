@@ -1,15 +1,15 @@
 # Milestones
 
 ## Milestone 1: Foundation
-Status: Planned
+Status: In Review
 
 ### 1.1 Project scaffold
-Status: Planned
+Status: In Review
 Feature: .moon_palace/feature_requests/20260601-001-foundation/
 Description: Serverless Framework project structure, TypeScript config, ESLint/Prettier, GitHub Actions CI/CD pipeline (typecheck, lint, test, deploy to preview on any push, deploy to prod on main), DynamoDB single-table provisioning, base Lambda handler wrapper.
 
 ### 1.2 Shared middleware
-Status: Planned
+Status: In Review
 Feature: .moon_palace/feature_requests/20260601-001-foundation/
 Description: Request validation (Zod), error boundary (no stack traces to client), structured logging helper, auth middleware stubs (human session + app Bearer token) to be wired up in Milestone 2.
 
