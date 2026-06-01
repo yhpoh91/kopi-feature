@@ -54,6 +54,9 @@ jobs:
     needs: ci
     if: github.ref != 'refs/heads/main'
     runs-on: ubuntu-latest
+    env:
+      REGION: ${{ secrets.AWS_REGION || 'ap-southeast-1' }}
+      STACK: kopi-feature-preview
     steps:
       - uses: actions/checkout@v4
 
@@ -73,92 +76,70 @@ jobs:
 
       - name: Check stack state
         run: |
-          REGION="${{ secrets.AWS_REGION || 'ap-southeast-1' }}"
           STATUS=$(aws cloudformation describe-stacks \
-            --stack-name kopi-feature-preview \
+            --stack-name "$STACK" \
             --region "$REGION" \
             --query 'Stacks[0].StackStatus' \
             --output text 2>/dev/null || echo "DOES_NOT_EXIST")
           echo "Stack status: $STATUS"
-          if [ "$STATUS" = "ROLLBACK_COMPLETE" ]; then
-            echo "::error::Stack kopi-feature-preview is in ROLLBACK_COMPLETE state."
-            echo "::error::A human must delete it before redeploying:"
-            echo "::error::  aws cloudformation delete-stack --stack-name kopi-feature-preview --region $REGION"
-            exit 1
-          fi
 
-      - name: Ensure deployment bucket
-        run: |
-          REGION="${{ secrets.AWS_REGION || 'ap-southeast-1' }}"
-          BUCKET="kopi-feature-sls-deployments"
-          if ! aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
-            echo "Creating deployment bucket $BUCKET..."
-            aws s3api create-bucket \
-              --bucket "$BUCKET" \
-              --region "$REGION" \
-              --create-bucket-configuration LocationConstraint="$REGION"
-            aws s3api put-bucket-encryption \
-              --bucket "$BUCKET" \
-              --server-side-encryption-configuration \
-                '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
-            aws s3api put-public-access-block \
-              --bucket "$BUCKET" \
-              --public-access-block-configuration \
-                "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
-            echo "Created."
-          else
-            echo "Bucket $BUCKET already exists."
-          fi
+          case "$STATUS" in
+            ROLLBACK_COMPLETE)
+              echo "Stack is in ROLLBACK_COMPLETE. Deleting before redeploy..."
+              aws cloudformation delete-stack --stack-name "$STACK" --region "$REGION"
+              aws cloudformation wait stack-delete-complete --stack-name "$STACK" --region "$REGION"
+              echo "Stack deleted. Proceeding with fresh deploy."
+              ;;
+            REVIEW_IN_PROGRESS)
+              # Stack was created via change set that was never executed.
+              # Deleting all pending change sets removes the stack.
+              echo "Stack is in REVIEW_IN_PROGRESS. Cancelling pending change sets..."
+              CHANGE_SETS=$(aws cloudformation list-change-sets \
+                --stack-name "$STACK" \
+                --region "$REGION" \
+                --query 'Summaries[*].ChangeSetName' \
+                --output text)
+              for CS in $CHANGE_SETS; do
+                echo "Deleting change set: $CS"
+                aws cloudformation delete-change-set \
+                  --stack-name "$STACK" \
+                  --change-set-name "$CS" \
+                  --region "$REGION"
+              done
+              aws cloudformation wait stack-delete-complete --stack-name "$STACK" --region "$REGION" 2>/dev/null || true
+              echo "Stack cleared. Proceeding with fresh deploy."
+              ;;
+            UPDATE_IN_PROGRESS|UPDATE_COMPLETE_CLEANUP_IN_PROGRESS|\
+            UPDATE_ROLLBACK_IN_PROGRESS|UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS|\
+            CREATE_IN_PROGRESS)
+              echo "Stack is in $STATUS. Waiting for stable state..."
+              aws cloudformation wait stack-update-complete --stack-name "$STACK" --region "$REGION" || true
+              ;;
+          esac
 
       - name: Check for pending migrations
         run: npm run migrate:check:preview
 
-      - name: Ensure Secrets Manager secrets
-        run: |
-          REGION="${{ secrets.AWS_REGION || 'ap-southeast-1' }}"
-          ensure_secret() {
-            local name="$1" value="$2"
-            if ! aws secretsmanager describe-secret --secret-id "$name" --region "$REGION" >/dev/null 2>&1; then
-              aws secretsmanager create-secret --name "$name" --secret-string "$value" --region "$REGION"
-              echo "Created: $name"
-            else
-              echo "Exists:  $name"
-            fi
-          }
-          # Add project secrets here as they are introduced in future milestones, e.g.:
-          # ensure_secret "kopi-feature/preview/sso-client-secret" "${{ secrets.SSO_CLIENT_SECRET_PREVIEW }}"
-
       - name: Deploy → Preview
         run: npx serverless deploy --stage preview --verbose
 
-      - name: Dump hook and stack diagnostics on failure
+      - name: Dump stack diagnostics on failure
         if: failure()
         run: |
-          REGION="${{ secrets.AWS_REGION || 'ap-southeast-1' }}"
-          echo "=== Hook invocation results ==="
-          aws cloudformation list-hook-results \
-            --target-type CHANGE_SET \
-            --region "$REGION" \
-            --output table 2>/dev/null || echo "No hook results available"
-          echo "=== Stack events ==="
           aws cloudformation describe-stack-events \
-            --stack-name kopi-feature-preview \
+            --stack-name "$STACK" \
             --region "$REGION" \
             --query 'StackEvents[?ResourceStatus==`CREATE_FAILED` || ResourceStatus==`UPDATE_FAILED` || ResourceStatus==`ROLLBACK_IN_PROGRESS`].[LogicalResourceId,ResourceType,ResourceStatusReason]' \
             --output table 2>/dev/null || echo "Stack does not exist or no events found"
-          echo "=== Registered hooks in account ==="
-          aws cloudformation list-types \
-            --type HOOK \
-            --visibility PRIVATE \
-            --region "$REGION" \
-            --query 'TypeSummaries[*].[TypeName,TypeArn]' \
-            --output table 2>/dev/null || echo "No private hooks found"
 
   deploy-prod:
     name: Deploy (prod)
     needs: ci
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    env:
+      REGION: ${{ secrets.AWS_REGION || 'ap-southeast-1' }}
+      STACK: kopi-feature-prod
     steps:
       - uses: actions/checkout@v4
 
@@ -176,46 +157,58 @@ jobs:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ secrets.AWS_REGION || 'ap-southeast-1' }}
 
-      - name: Ensure deployment bucket
+      - name: Check stack state
         run: |
-          REGION="${{ secrets.AWS_REGION || 'ap-southeast-1' }}"
-          BUCKET="kopi-feature-sls-deployments"
-          if ! aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
-            echo "Creating deployment bucket $BUCKET..."
-            aws s3api create-bucket \
-              --bucket "$BUCKET" \
-              --region "$REGION" \
-              --create-bucket-configuration LocationConstraint="$REGION"
-            aws s3api put-bucket-encryption \
-              --bucket "$BUCKET" \
-              --server-side-encryption-configuration \
-                '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
-            aws s3api put-public-access-block \
-              --bucket "$BUCKET" \
-              --public-access-block-configuration \
-                "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
-            echo "Created."
-          else
-            echo "Bucket $BUCKET already exists."
-          fi
+          STATUS=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK" \
+            --region "$REGION" \
+            --query 'Stacks[0].StackStatus' \
+            --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+          echo "Stack status: $STATUS"
+
+          case "$STATUS" in
+            ROLLBACK_COMPLETE)
+              echo "Stack is in ROLLBACK_COMPLETE. Deleting before redeploy..."
+              aws cloudformation delete-stack --stack-name "$STACK" --region "$REGION"
+              aws cloudformation wait stack-delete-complete --stack-name "$STACK" --region "$REGION"
+              echo "Stack deleted. Proceeding with fresh deploy."
+              ;;
+            REVIEW_IN_PROGRESS)
+              echo "Stack is in REVIEW_IN_PROGRESS. Cancelling pending change sets..."
+              CHANGE_SETS=$(aws cloudformation list-change-sets \
+                --stack-name "$STACK" \
+                --region "$REGION" \
+                --query 'Summaries[*].ChangeSetName' \
+                --output text)
+              for CS in $CHANGE_SETS; do
+                echo "Deleting change set: $CS"
+                aws cloudformation delete-change-set \
+                  --stack-name "$STACK" \
+                  --change-set-name "$CS" \
+                  --region "$REGION"
+              done
+              aws cloudformation wait stack-delete-complete --stack-name "$STACK" --region "$REGION" 2>/dev/null || true
+              echo "Stack cleared. Proceeding with fresh deploy."
+              ;;
+            UPDATE_IN_PROGRESS|UPDATE_COMPLETE_CLEANUP_IN_PROGRESS|\
+            UPDATE_ROLLBACK_IN_PROGRESS|UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS|\
+            CREATE_IN_PROGRESS)
+              echo "Stack is in $STATUS. Waiting for stable state..."
+              aws cloudformation wait stack-update-complete --stack-name "$STACK" --region "$REGION" || true
+              ;;
+          esac
 
       - name: Check for pending migrations
         run: npm run migrate:check:prod
 
-      - name: Ensure Secrets Manager secrets
-        run: |
-          REGION="${{ secrets.AWS_REGION || 'ap-southeast-1' }}"
-          ensure_secret() {
-            local name="$1" value="$2"
-            if ! aws secretsmanager describe-secret --secret-id "$name" --region "$REGION" >/dev/null 2>&1; then
-              aws secretsmanager create-secret --name "$name" --secret-string "$value" --region "$REGION"
-              echo "Created: $name"
-            else
-              echo "Exists:  $name"
-            fi
-          }
-          # Add project secrets here as they are introduced in future milestones, e.g.:
-          # ensure_secret "kopi-feature/prod/sso-client-secret" "${{ secrets.SSO_CLIENT_SECRET_PROD }}"
-
       - name: Deploy → Production
         run: npx serverless deploy --stage prod --verbose
+
+      - name: Dump stack diagnostics on failure
+        if: failure()
+        run: |
+          aws cloudformation describe-stack-events \
+            --stack-name "$STACK" \
+            --region "$REGION" \
+            --query 'StackEvents[?ResourceStatus==`CREATE_FAILED` || ResourceStatus==`UPDATE_FAILED` || ResourceStatus==`ROLLBACK_IN_PROGRESS`].[LogicalResourceId,ResourceType,ResourceStatusReason]' \
+            --output table 2>/dev/null || echo "Stack does not exist or no events found"

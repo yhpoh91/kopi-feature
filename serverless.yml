@@ -9,10 +9,6 @@ provider:
   region: ap-southeast-1
   stage: ${opt:stage, 'preview'}
   logRetentionInDays: ${self:custom.logRetentionDays.${self:provider.stage}, 7}
-  deploymentBucket:
-    name: kopi-feature-sls-deployments
-    serverSideEncryption: AES256
-
   environment:
     STAGE: ${self:provider.stage}
     SERVICE_NAME: kopi-feature
@@ -98,24 +94,11 @@ resources:
             AttributeType: S
           - AttributeName: SK
             AttributeType: S
-          - AttributeName: GSI1PK
-            AttributeType: S
-          - AttributeName: GSI1SK
-            AttributeType: S
         KeySchema:
           - AttributeName: PK
             KeyType: HASH
           - AttributeName: SK
             KeyType: RANGE
-        GlobalSecondaryIndexes:
-          - IndexName: GSI1
-            KeySchema:
-              - AttributeName: GSI1PK
-                KeyType: HASH
-              - AttributeName: GSI1SK
-                KeyType: RANGE
-            Projection:
-              ProjectionType: ALL
         Tags:
           - Key: Project
             Value: kopi-feature
