@@ -206,6 +206,27 @@ Feature: .moon_palace/feature_requests/{YYYYMMDD}-{id}-{slug}/
 
 ## NEXT STEP Block
 
+Every invocation must end with a FILES block immediately followed by a NEXT STEP block.
+
+The FILES block prints the **full content** of every file created or edited this step so the engineer can read and confirm without opening any files manually. Use a fenced code block per file.
+
+```
+---
+FILES
+
+### Created: {file path}
+```
+{full file content}
+```
+
+### Edited: {file path}
+```
+{full file content}
+```
+
+*(repeat for each file; omit the section heading if nothing was created or nothing was edited)*
+```
+
 Every invocation must end with this block:
 
 ```
