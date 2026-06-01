@@ -115,6 +115,15 @@ jobs:
       - name: Deploy → Preview
         run: npx serverless deploy --stage preview --verbose
 
+      - name: Dump CloudFormation events on failure
+        if: failure()
+        run: |
+          aws cloudformation describe-stack-events \
+            --stack-name kopi-feature-preview \
+            --region "${{ secrets.AWS_REGION || 'ap-southeast-1' }}" \
+            --query 'StackEvents[?ResourceStatus==`CREATE_FAILED` || ResourceStatus==`UPDATE_FAILED` || ResourceStatus==`ROLLBACK_IN_PROGRESS`].[LogicalResourceId,ResourceType,ResourceStatusReason]' \
+            --output table 2>/dev/null || echo "Stack does not exist or no events found"
+
   deploy-prod:
     name: Deploy (prod)
     needs: ci
