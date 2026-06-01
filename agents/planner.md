@@ -227,9 +227,6 @@ FILES
 *(repeat for each file; omit the section heading if nothing was created or nothing was edited)*
 ```
 
-Every invocation must end with this block:
-
-```
 ---
 NEXT STEP
 Agent to invoke : {planner (step N) | builder}
