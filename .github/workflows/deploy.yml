@@ -131,14 +131,28 @@ jobs:
       - name: Deploy → Preview
         run: npx serverless deploy --stage preview --verbose
 
-      - name: Dump CloudFormation events on failure
+      - name: Dump hook and stack diagnostics on failure
         if: failure()
         run: |
+          REGION="${{ secrets.AWS_REGION || 'ap-southeast-1' }}"
+          echo "=== Hook invocation results ==="
+          aws cloudformation list-hook-results \
+            --target-type CHANGE_SET \
+            --region "$REGION" \
+            --output table 2>/dev/null || echo "No hook results available"
+          echo "=== Stack events ==="
           aws cloudformation describe-stack-events \
             --stack-name kopi-feature-preview \
-            --region "${{ secrets.AWS_REGION || 'ap-southeast-1' }}" \
+            --region "$REGION" \
             --query 'StackEvents[?ResourceStatus==`CREATE_FAILED` || ResourceStatus==`UPDATE_FAILED` || ResourceStatus==`ROLLBACK_IN_PROGRESS`].[LogicalResourceId,ResourceType,ResourceStatusReason]' \
             --output table 2>/dev/null || echo "Stack does not exist or no events found"
+          echo "=== Registered hooks in account ==="
+          aws cloudformation list-types \
+            --type HOOK \
+            --visibility PRIVATE \
+            --region "$REGION" \
+            --query 'TypeSummaries[*].[TypeName,TypeArn]' \
+            --output table 2>/dev/null || echo "No private hooks found"
 
   deploy-prod:
     name: Deploy (prod)
