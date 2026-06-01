@@ -1,0 +1,101 @@
+# Required GitHub repository secrets (Settings → Secrets → Actions):
+#   AWS_DEPLOY_ROLE_ARN — IAM role ARN for OIDC federation
+#
+# Required GitHub repository variables (Settings → Variables → Actions):
+#   AWS_REGION — deployment region (e.g. ap-southeast-1)
+
+name: Deploy
+
+on:
+  push:
+    branches: ['**']
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Secrets scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Security audit
+        run: npm audit --audit-level=high
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Check for pending migrations (preview)
+        if: github.ref != 'refs/heads/main'
+        run: npm run migrate:check:preview
+
+      - name: Check for pending migrations (prod)
+        if: github.ref == 'refs/heads/main'
+        run: npm run migrate:check:prod
+
+      - name: Ensure Secrets Manager secrets (preview)
+        if: github.ref != 'refs/heads/main'
+        run: |
+          REGION="${{ vars.AWS_REGION }}"
+          ensure_secret() {
+            local name="$1" value="$2"
+            if ! aws secretsmanager describe-secret --secret-id "$name" --region "$REGION" >/dev/null 2>&1; then
+              aws secretsmanager create-secret --name "$name" --secret-string "$value" --region "$REGION"
+              echo "Created: $name"
+            else
+              echo "Exists:  $name"
+            fi
+          }
+          # Add project secrets here as they are introduced in future milestones, e.g.:
+          # ensure_secret "kopi-feature/preview/sso-client-secret" "${{ secrets.SSO_CLIENT_SECRET_PREVIEW }}"
+
+      - name: Ensure Secrets Manager secrets (prod)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          REGION="${{ vars.AWS_REGION }}"
+          ensure_secret() {
+            local name="$1" value="$2"
+            if ! aws secretsmanager describe-secret --secret-id "$name" --region "$REGION" >/dev/null 2>&1; then
+              aws secretsmanager create-secret --name "$name" --secret-string "$value" --region "$REGION"
+              echo "Created: $name"
+            else
+              echo "Exists:  $name"
+            fi
+          }
+          # Add project secrets here as they are introduced in future milestones, e.g.:
+          # ensure_secret "kopi-feature/prod/sso-client-secret" "${{ secrets.SSO_CLIENT_SECRET_PROD }}"
+
+      - name: Deploy → Preview
+        if: github.ref != 'refs/heads/main'
+        run: npx serverless deploy --stage preview --verbose
+
+      - name: Deploy → Production
+        if: github.ref == 'refs/heads/main'
+        run: npx serverless deploy --stage prod --verbose

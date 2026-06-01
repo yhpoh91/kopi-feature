@@ -1,0 +1,41 @@
+{
+  "name": "kopi-feature",
+  "version": "0.1.0",
+  "description": "Feature flag service",
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src test",
+    "lint:fix": "eslint src test --fix",
+    "format": "prettier --write src test",
+    "test": "vitest run --coverage",
+    "test:watch": "vitest watch",
+    "migrate:check:preview": "echo 'No pending migrations' && exit 0",
+    "migrate:check:prod": "echo 'No pending migrations' && exit 0",
+    "migrate:preview": "echo 'No migrations to run' && exit 0",
+    "migrate:prod": "echo 'No migrations to run' && exit 0"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.140",
+    "@types/node": "^22.0.0",
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "@typescript-eslint/parser": "^7.18.0",
+    "@vitest/coverage-v8": "^2.0.0",
+    "aws-sdk-client-mock": "^4.0.0",
+    "eslint": "^8.57.0",
+    "prettier": "^3.3.0",
+    "serverless": "^3.38.0",
+    "serverless-esbuild": "^1.52.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.600.0",
+    "@aws-sdk/lib-dynamodb": "^3.600.0",
+    "aws-xray-sdk-core": "^3.6.0",
+    "zod": "^3.23.0"
+  }
+}

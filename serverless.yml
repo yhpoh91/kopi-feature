@@ -1,0 +1,144 @@
+service: kopi-feature
+
+plugins:
+  - serverless-esbuild
+
+provider:
+  name: aws
+  runtime: nodejs22.x
+  region: ap-southeast-1
+  stage: ${opt:stage, 'preview'}
+  logRetentionInDays: ${self:custom.logRetentionDays.${self:provider.stage}, 7}
+
+  environment:
+    STAGE: ${self:provider.stage}
+    SERVICE_NAME: kopi-feature
+    TABLE_NAME: kopi-feature_data_${self:provider.stage}
+
+  stackTags:
+    Project: kopi-feature
+    Stage: ${self:provider.stage}
+    Owner: kopi-feature
+    ManagedBy: serverless
+
+  httpApi:
+    cors:
+      allowedOrigins:
+        - https://feature.kopi.life
+        - https://feature-preview.kopi.life
+      allowedMethods:
+        - GET
+        - POST
+        - PUT
+        - PATCH
+        - DELETE
+        - OPTIONS
+      allowedHeaders:
+        - Content-Type
+        - Authorization
+        - X-CSRF-Token
+      allowCredentials: true
+    throttle:
+      burstLimit: 500
+      rateLimit: 1000
+
+custom:
+  logRetentionDays:
+    prod: 90
+    preview: 7
+
+  pitrEnabled:
+    prod: true
+    preview: false
+
+  esbuild:
+    bundle: true
+    minify: false
+    sourcemap: true
+    target: node22
+    platform: node
+    format: cjs
+
+functions:
+  health:
+    handler: src/handlers/health.handler
+    role: !GetAtt HealthLambdaRole.Arn
+    timeout: 5
+    memorySize: 128
+    reservedConcurrency: 100
+    tracing: Active
+    events:
+      - httpApi:
+          method: GET
+          path: /health
+
+resources:
+  Resources:
+    HealthLambdaRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: ${self:service}-${self:provider.stage}-health-role
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: lambda.amazonaws.com
+              Action: sts:AssumeRole
+        Policies:
+          - PolicyName: HealthLambdaPolicy
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - logs:CreateLogGroup
+                    - logs:CreateLogStream
+                    - logs:PutLogEvents
+                  Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${self:service}-${self:provider.stage}-health:*'
+                - Effect: Allow
+                  Action:
+                    - xray:PutTraceSegments
+                    - xray:PutTelemetryRecords
+                  Resource: '*'
+
+    DataTable:
+      Type: AWS::DynamoDB::Table
+      DeletionPolicy: Retain
+      Properties:
+        TableName: kopi-feature_data_${self:provider.stage}
+        BillingMode: PAY_PER_REQUEST
+        PointInTimeRecoverySpecification:
+          PointInTimeRecoveryEnabled: ${self:custom.pitrEnabled.${self:provider.stage}, false}
+        AttributeDefinitions:
+          - AttributeName: PK
+            AttributeType: S
+          - AttributeName: SK
+            AttributeType: S
+          - AttributeName: GSI1PK
+            AttributeType: S
+          - AttributeName: GSI1SK
+            AttributeType: S
+        KeySchema:
+          - AttributeName: PK
+            KeyType: HASH
+          - AttributeName: SK
+            KeyType: RANGE
+        GlobalSecondaryIndexes:
+          - IndexName: GSI1
+            KeySchema:
+              - AttributeName: GSI1PK
+                KeyType: HASH
+              - AttributeName: GSI1SK
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+        Tags:
+          - Key: Project
+            Value: kopi-feature
+          - Key: Stage
+            Value: ${self:provider.stage}
+          - Key: Owner
+            Value: kopi-feature
+          - Key: ManagedBy
+            Value: serverless
