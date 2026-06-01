@@ -9,6 +9,9 @@ provider:
   region: ap-southeast-1
   stage: ${opt:stage, 'preview'}
   logRetentionInDays: ${self:custom.logRetentionDays.${self:provider.stage}, 7}
+  deploymentBucket:
+    name: kopi-feature-sls-deployments
+    serverSideEncryption: AES256
 
   environment:
     STAGE: ${self:provider.stage}
